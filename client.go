@@ -13,9 +13,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // OpCode represents the wire protocol operation codes.
@@ -969,13 +971,13 @@ func (c *IPCClient) EndSpan(traceID, spanID, status string) (int64, error) {
 
 // Helper functions for time
 func now() int64 {
-	return int64(1704067200) // Placeholder - in real code use time.Now().Unix()
+	return time.Now().Unix()
 }
 
 func nowMicros() int64 {
-	return now() * 1000000
+	return time.Now().UnixMicro()
 }
 
 func randUint32() uint32 {
-	return uint32(now() % 0xFFFFFFFF) // Simple pseudo-random
+	return rand.Uint32()
 }

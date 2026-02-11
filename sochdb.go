@@ -106,4 +106,4 @@
 package sochdb
 
 // Version is the current SDK version.
-const Version = "0.4.3"
+const Version = "0.4.4"

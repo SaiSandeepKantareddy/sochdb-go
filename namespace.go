@@ -33,6 +33,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"math/rand"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -207,14 +211,60 @@ func (c *Collection) InsertMany(vectors [][]float32, metadatas []map[string]inte
 	return resultIDs, nil
 }
 
-// Search finds similar vectors
+// Search finds similar vectors using brute-force cosine similarity
 func (c *Collection) Search(request SearchRequest) ([]SearchResult, error) {
-	// For now, implement basic linear search
-	// In production, this would use HNSW index
 	results := make([]SearchResult, 0)
+	prefix := []byte(c.vectorKeyPrefix())
 
-	// TODO: Implement efficient scanning with range queries
-	// For now, this is a placeholder that shows the API structure
+	// Try scan-based approach
+	type scanDB interface {
+		ScanPrefix(prefix []byte) ScanIteratorInterface
+	}
+	if db, ok := c.db.(scanDB); ok {
+		iter := db.ScanPrefix(prefix)
+		defer iter.Close()
+
+		for {
+			keyBuf, valueBuf, ok := iter.Next()
+			if !ok {
+				break
+			}
+			var data vectorData
+			if json.Unmarshal(valueBuf, &data) != nil {
+				continue
+			}
+
+			// Apply metadata filter
+			if request.Filter != nil && !matchesFilter(data.Metadata, request.Filter) {
+				continue
+			}
+
+			score := computeCosineSimilarity(request.QueryVector, data.Vector)
+			keyStr := string(keyBuf)
+			id := keyStr[len(c.vectorKeyPrefix()):]
+
+			result := SearchResult{ID: id, Score: score}
+			if request.IncludeMetadata {
+				result.Vector = data.Vector
+				result.Metadata = data.Metadata
+			}
+			results = append(results, result)
+		}
+
+		if iter.Err() != nil {
+			return nil, iter.Err()
+		}
+	}
+
+	// Sort by score descending
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	// Limit to K results
+	if len(results) > request.K {
+		results = results[:request.K]
+	}
 
 	return results, nil
 }
@@ -261,8 +311,25 @@ func (c *Collection) Delete(id string) error {
 
 // Count returns the number of vectors in the collection
 func (c *Collection) Count() (int, error) {
-	// TODO: Implement efficient counting
-	return 0, nil
+	prefix := []byte(c.vectorKeyPrefix())
+	count := 0
+
+	type scanDB interface {
+		ScanPrefix(prefix []byte) ScanIteratorInterface
+	}
+	if db, ok := c.db.(scanDB); ok {
+		iter := db.ScanPrefix(prefix)
+		defer iter.Close()
+		for {
+			_, _, ok := iter.Next()
+			if !ok {
+				break
+			}
+			count++
+		}
+	}
+
+	return count, nil
 }
 
 // Helper methods
@@ -286,7 +353,7 @@ func randomString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
+		b[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(b)
 }
@@ -400,12 +467,37 @@ func (ns *Namespace) GetOrCreateCollection(config CollectionConfig) (*Collection
 	return collection, nil
 }
 
-// DeleteCollection deletes a collection
+// DeleteCollection deletes a collection and all its data
 func (ns *Namespace) DeleteCollection(name string) error {
+	prefix := []byte(fmt.Sprintf("_collection/%s/%s/", ns.name, name))
+
+	// Try scan-based approach to delete all collection keys
+	type scanDeleteDB interface {
+		ScanPrefix(prefix []byte) ScanIteratorInterface
+		Delete([]byte) error
+	}
+	if db, ok := ns.db.(scanDeleteDB); ok {
+		var toDelete [][]byte
+		iter := db.ScanPrefix(prefix)
+		for {
+			keyBuf, _, ok := iter.Next()
+			if !ok {
+				break
+			}
+			keyCopy := make([]byte, len(keyBuf))
+			copy(keyCopy, keyBuf)
+			toDelete = append(toDelete, keyCopy)
+		}
+		iter.Close()
+
+		for _, key := range toDelete {
+			db.Delete(key)
+		}
+		return nil
+	}
+
+	// Fallback: just delete the metadata key
 	metadataKey := fmt.Sprintf("_collection/%s/%s/metadata", ns.name, name)
-
-	// TODO: Delete all keys with prefix
-
 	switch db := ns.db.(type) {
 	case interface{ Delete([]byte) error }:
 		return db.Delete([]byte(metadataKey))
@@ -416,8 +508,40 @@ func (ns *Namespace) DeleteCollection(name string) error {
 
 // ListCollections lists all collections in this namespace
 func (ns *Namespace) ListCollections() ([]string, error) {
-	// TODO: Implement efficient listing with range queries
-	return []string{}, nil
+	prefix := []byte(fmt.Sprintf("_collection/%s/", ns.name))
+	prefixStr := string(prefix)
+	collections := make(map[string]bool)
+
+	// Try scan-based approach
+	type scanDB interface {
+		ScanPrefix(prefix []byte) ScanIteratorInterface
+	}
+	if db, ok := ns.db.(scanDB); ok {
+		iter := db.ScanPrefix(prefix)
+		defer iter.Close()
+
+		for {
+			keyBuf, _, ok := iter.Next()
+			if !ok {
+				break
+			}
+			key := string(keyBuf)
+			if len(key) > len(prefixStr) {
+				afterPrefix := key[len(prefixStr):]
+				parts := strings.SplitN(afterPrefix, "/", 2)
+				if len(parts) > 0 && parts[0] != "" {
+					collections[parts[0]] = true
+				}
+			}
+		}
+	}
+
+	result := make([]string, 0, len(collections))
+	for name := range collections {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 // GetName returns the namespace name
@@ -428,4 +552,41 @@ func (ns *Namespace) GetName() string {
 // GetConfig returns the namespace config
 func (ns *Namespace) GetConfig() NamespaceConfig {
 	return ns.config
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// computeCosineSimilarity computes cosine similarity between two vectors
+func computeCosineSimilarity(a, b []float32) float32 {
+	if len(a) != len(b) {
+		return 0
+	}
+	var dot, normA, normB float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
+	}
+	normA = math.Sqrt(normA)
+	normB = math.Sqrt(normB)
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return float32(dot / (normA * normB))
+}
+
+// matchesFilter checks if metadata matches a filter
+func matchesFilter(metadata map[string]interface{}, filter map[string]interface{}) bool {
+	if metadata == nil {
+		return false
+	}
+	for key, expected := range filter {
+		actual, ok := metadata[key]
+		if !ok || fmt.Sprintf("%v", actual) != fmt.Sprintf("%v", expected) {
+			return false
+		}
+	}
+	return true
 }

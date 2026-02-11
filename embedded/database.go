@@ -86,6 +86,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -103,6 +104,10 @@ type Database struct {
 //
 // For web applications with multiple processes, use OpenConcurrent instead.
 func Open(path string) (*Database, error) {
+	if strings.ContainsRune(path, 0) {
+		return nil, errors.New("database path must not contain null bytes")
+	}
+
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
 
@@ -149,6 +154,10 @@ func Open(path string) (*Database, error) {
 //	// Each worker process can access the database concurrently
 //	r.Run(":8080")
 func OpenConcurrent(path string) (*Database, error) {
+	if strings.ContainsRune(path, 0) {
+		return nil, errors.New("database path must not contain null bytes")
+	}
+
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
 
@@ -242,6 +251,17 @@ func (db *Database) GetPath(path string) ([]byte, error) {
 
 	_ = txn.Commit()
 	return value, nil
+}
+
+// ScanPrefix returns an iterator for keys with the given prefix (auto-transaction)
+//
+// Note: The returned iterator holds a transaction open. Call Close() when done.
+func (db *Database) ScanPrefix(prefix []byte) *ScanIterator {
+	txn := db.Begin()
+	iter := txn.ScanPrefix(prefix)
+	// The transaction will be aborted when the iterator is closed or GC'd
+	// For simplicity, we let the caller manage the iterator lifecycle
+	return iter
 }
 
 // Begin starts a new transaction

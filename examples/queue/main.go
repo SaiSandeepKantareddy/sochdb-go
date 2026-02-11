@@ -27,7 +27,7 @@ func main() {
 	dbPath := filepath.Join(os.TempDir(), "queue-example-db")
 	os.RemoveAll(dbPath)
 
-	fmt.Println("🚀 SochDB Priority Queue API Example\n")
+	fmt.Println("🚀 SochDB Priority Queue API Example")
 
 	// Open embedded database
 	db, err := embedded.Open(dbPath)
@@ -35,7 +35,7 @@ func main() {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 	defer db.Close()
-	fmt.Println("✅ Database opened\n")
+	fmt.Println("✅ Database opened")
 
 	// Example 1: Create a priority queue for job processing
 	fmt.Println("📋 Creating priority queue for background jobs...")
@@ -45,7 +45,7 @@ func main() {
 		MaxRetries:        3,
 		DeadLetterQueue:   "failed-jobs",
 	})
-	fmt.Println("✅ Queue created: background-jobs\n")
+	fmt.Println("✅ Queue created: background-jobs")
 
 	// Example 2: Enqueue tasks with different priorities
 	fmt.Println("📝 Enqueueing tasks (lower priority = higher urgency)...")
@@ -87,7 +87,7 @@ func main() {
 	fmt.Printf("✅ Enqueued %d tasks\n\n", len(tasks))
 
 	// Example 3: Worker simulation - Dequeue and process tasks
-	fmt.Println("👷 Worker #1 processing tasks...\n")
+	fmt.Println("👷 Worker #1 processing tasks...")
 	simulateWorker(jobQueue, "worker-1", 3)
 
 	// Example 4: Show queue statistics
@@ -168,7 +168,7 @@ func main() {
 	}
 	fmt.Printf("✅ Scheduled %d tasks\n\n", len(scheduledTasks))
 
-	fmt.Println("✨ Example completed successfully!\n")
+	fmt.Println("✨ Example completed successfully!")
 	fmt.Println("Key Features Demonstrated:")
 	fmt.Println("  ✓ Priority-based task ordering")
 	fmt.Println("  ✓ Worker task claiming and processing")

@@ -40,10 +40,12 @@
 package sochdb
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"time"
 )
 
@@ -263,12 +265,200 @@ func (pq *PriorityQueue) Enqueue(priority int64, payload []byte, metadata map[st
 	return taskID, nil
 }
 
+// ScanPrefixDB is the interface databases must implement for scan-based operations
+type ScanPrefixDB interface {
+	Put(key, value []byte) error
+	Get(key []byte) ([]byte, error)
+	ScanPrefix(prefix []byte) ScanIteratorInterface
+}
+
+// ScanIteratorInterface is the interface for scan iterators
+type ScanIteratorInterface interface {
+	Next() (key []byte, value []byte, ok bool)
+	Close()
+	Err() error
+}
+
 // Dequeue gets the highest priority task
 // Returns nil if no tasks available
 func (pq *PriorityQueue) Dequeue(workerID string) (*Task, error) {
-	// TODO: Implement range scan to find first ready task
-	// For now, this is a placeholder
+	nowMs := time.Now().UnixMilli()
+	prefix := []byte(fmt.Sprintf("queue/%s/", pq.config.Name))
+
+	// Try scan-based approach first (embedded database with ScanPrefix on txn)
+	type scanDB interface {
+		ScanPrefix(prefix []byte) ScanIteratorInterface
+		Put(key, value []byte) error
+	}
+
+	if db, ok := pq.db.(scanDB); ok {
+		iter := db.ScanPrefix(prefix)
+		defer iter.Close()
+
+		for {
+			keyBuf, valueBuf, ok := iter.Next()
+			if !ok {
+				break
+			}
+
+			var task Task
+			if err := json.Unmarshal(valueBuf, &task); err != nil {
+				continue
+			}
+
+			if task.State != TaskStatePending {
+				continue
+			}
+
+			// Decode key to check readyTs
+			qk, err := DecodeQueueKey(keyBuf)
+			if err != nil {
+				continue
+			}
+			if qk.ReadyTs > nowMs {
+				continue
+			}
+
+			// Claim this task
+			task.State = TaskStateClaimed
+			claimedAt := nowMs
+			task.ClaimedAt = &claimedAt
+			task.ClaimedBy = workerID
+
+			updatedValue, _ := json.Marshal(task)
+			if err := db.Put(keyBuf, updatedValue); err != nil {
+				return nil, err
+			}
+
+			pq.decrementStat("pending")
+			pq.incrementStat("claimed")
+			pq.incrementStat("totalDequeued")
+
+			return &task, nil
+		}
+
+		if iter.Err() != nil {
+			return nil, iter.Err()
+		}
+	}
+
+	// Fallback: use IPC scan if available
+	type scanIPCDB interface {
+		Scan(prefix string) ([]KeyValue, error)
+		Put(key, value []byte) error
+	}
+
+	if db, ok := pq.db.(scanIPCDB); ok {
+		kvs, err := db.Scan(string(prefix))
+		if err != nil {
+			return nil, err
+		}
+
+		for _, kv := range kvs {
+			var task Task
+			if err := json.Unmarshal(kv.Value, &task); err != nil {
+				continue
+			}
+
+			if task.State != TaskStatePending {
+				continue
+			}
+
+			task.State = TaskStateClaimed
+			claimedAt := nowMs
+			task.ClaimedAt = &claimedAt
+			task.ClaimedBy = workerID
+
+			updatedValue, _ := json.Marshal(task)
+			if err := db.Put(kv.Key, updatedValue); err != nil {
+				return nil, err
+			}
+
+			pq.decrementStat("pending")
+			pq.incrementStat("claimed")
+			pq.incrementStat("totalDequeued")
+
+			return &task, nil
+		}
+	}
+
 	return nil, nil
+}
+
+// DecodeQueueKey decodes a queue key from bytes using positional parsing.
+// Key format: "queue/" + queueId + "/" + i64BE(priority) + "/" + u64BE(readyTs) + "/" + u64BE(sequence) + "/" + taskId
+// Binary fields may contain 0x2F ('/'), so split('/') is NOT safe.
+func DecodeQueueKey(data []byte) (*QueueKey, error) {
+	prefix := []byte("queue/")
+	if len(data) < len(prefix) || !bytes.Equal(data[:len(prefix)], prefix) {
+		return nil, errors.New("invalid queue key: missing queue/ prefix")
+	}
+
+	offset := len(prefix)
+
+	// Find queueId: scan for '/' that leaves enough room for 8+1+8+1+8+1+taskId = at least 28 bytes
+	queueIDEnd := -1
+	for i := offset; i < len(data); i++ {
+		if data[i] == '/' {
+			remaining := len(data) - i - 1
+			if remaining >= 28 { // 8+1+8+1+8+1+1 minimum
+				queueIDEnd = i
+				break
+			}
+		}
+	}
+	if queueIDEnd < 0 {
+		return nil, errors.New("invalid queue key: cannot find queueId boundary")
+	}
+
+	queueID := string(data[offset:queueIDEnd])
+	offset = queueIDEnd + 1
+
+	// Read priority (8 bytes)
+	if offset+8 > len(data) {
+		return nil, errors.New("invalid queue key: truncated priority")
+	}
+	priority := decodeI64BE(data[offset : offset+8])
+	offset += 8
+
+	if offset >= len(data) || data[offset] != '/' {
+		return nil, errors.New("invalid queue key: expected / after priority")
+	}
+	offset++
+
+	// Read readyTs (8 bytes)
+	if offset+8 > len(data) {
+		return nil, errors.New("invalid queue key: truncated readyTs")
+	}
+	readyTs := int64(decodeU64BE(data[offset : offset+8]))
+	offset += 8
+
+	if offset >= len(data) || data[offset] != '/' {
+		return nil, errors.New("invalid queue key: expected / after readyTs")
+	}
+	offset++
+
+	// Read sequence (8 bytes)
+	if offset+8 > len(data) {
+		return nil, errors.New("invalid queue key: truncated sequence")
+	}
+	sequence := decodeU64BE(data[offset : offset+8])
+	offset += 8
+
+	if offset >= len(data) || data[offset] != '/' {
+		return nil, errors.New("invalid queue key: expected / after sequence")
+	}
+	offset++
+
+	taskID := string(data[offset:])
+
+	return &QueueKey{
+		QueueID:  queueID,
+		Priority: priority,
+		ReadyTs:  readyTs,
+		Sequence: sequence,
+		TaskID:   taskID,
+	}, nil
 }
 
 // Ack acknowledges task completion
@@ -348,9 +538,70 @@ func (pq *PriorityQueue) Stats() (*QueueStats, error) {
 	}, nil
 }
 
-// Purge removes completed tasks
+// Purge removes completed and dead-lettered tasks
 func (pq *PriorityQueue) Purge() (int, error) {
-	// TODO: Implement purging of completed tasks
+	prefix := []byte(fmt.Sprintf("queue/%s/", pq.config.Name))
+	purged := 0
+
+	// Try scan-based approach
+	type scanDeleteDB interface {
+		ScanPrefix(prefix []byte) ScanIteratorInterface
+		Delete(key []byte) error
+	}
+
+	if db, ok := pq.db.(scanDeleteDB); ok {
+		var toDelete [][]byte
+		iter := db.ScanPrefix(prefix)
+		for {
+			keyBuf, valueBuf, ok := iter.Next()
+			if !ok {
+				break
+			}
+			var task Task
+			if json.Unmarshal(valueBuf, &task) != nil {
+				continue
+			}
+			if task.State == TaskStateCompleted || task.State == TaskStateDeadLettered {
+				keysCopy := make([]byte, len(keyBuf))
+				copy(keysCopy, keyBuf)
+				toDelete = append(toDelete, keysCopy)
+			}
+		}
+		iter.Close()
+
+		for _, key := range toDelete {
+			if db.Delete(key) == nil {
+				purged++
+			}
+		}
+		return purged, nil
+	}
+
+	// Fallback: IPC scan
+	type scanIPCDeleteDB interface {
+		Scan(prefix string) ([]KeyValue, error)
+		Delete(key []byte) error
+	}
+
+	if db, ok := pq.db.(scanIPCDeleteDB); ok {
+		kvs, err := db.Scan(string(prefix))
+		if err != nil {
+			return 0, err
+		}
+		for _, kv := range kvs {
+			var task Task
+			if json.Unmarshal(kv.Value, &task) != nil {
+				continue
+			}
+			if task.State == TaskStateCompleted || task.State == TaskStateDeadLettered {
+				if db.Delete(kv.Key) == nil {
+					purged++
+				}
+			}
+		}
+		return purged, nil
+	}
+
 	return 0, nil
 }
 
@@ -363,18 +614,116 @@ func randomTaskString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
+		b[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(b)
 }
 
 func (pq *PriorityQueue) getTask(taskID string) (*Task, error) {
-	// TODO: Implement task lookup
+	prefix := []byte(fmt.Sprintf("queue/%s/", pq.config.Name))
+
+	// Try scan-based lookup
+	type scanDB interface {
+		ScanPrefix(prefix []byte) ScanIteratorInterface
+	}
+
+	if db, ok := pq.db.(scanDB); ok {
+		iter := db.ScanPrefix(prefix)
+		defer iter.Close()
+
+		for {
+			_, valueBuf, ok := iter.Next()
+			if !ok {
+				break
+			}
+			var task Task
+			if json.Unmarshal(valueBuf, &task) != nil {
+				continue
+			}
+			if task.TaskID == taskID {
+				return &task, nil
+			}
+		}
+		return nil, nil
+	}
+
+	// Fallback: IPC scan
+	type scanIPCDB interface {
+		Scan(prefix string) ([]KeyValue, error)
+	}
+
+	if db, ok := pq.db.(scanIPCDB); ok {
+		kvs, err := db.Scan(string(prefix))
+		if err != nil {
+			return nil, err
+		}
+		for _, kv := range kvs {
+			var task Task
+			if json.Unmarshal(kv.Value, &task) != nil {
+				continue
+			}
+			if task.TaskID == taskID {
+				return &task, nil
+			}
+		}
+	}
+
 	return nil, nil
 }
 
 func (pq *PriorityQueue) updateTask(task *Task) error {
-	// TODO: Implement task update
+	prefix := []byte(fmt.Sprintf("queue/%s/", pq.config.Name))
+
+	// Try scan-based lookup and update
+	type scanPutDB interface {
+		ScanPrefix(prefix []byte) ScanIteratorInterface
+		Put(key, value []byte) error
+	}
+
+	if db, ok := pq.db.(scanPutDB); ok {
+		iter := db.ScanPrefix(prefix)
+		defer iter.Close()
+
+		for {
+			keyBuf, valueBuf, ok := iter.Next()
+			if !ok {
+				break
+			}
+			var existing Task
+			if json.Unmarshal(valueBuf, &existing) != nil {
+				continue
+			}
+			if existing.TaskID == task.TaskID {
+				updatedValue, _ := json.Marshal(task)
+				return db.Put(keyBuf, updatedValue)
+			}
+		}
+		return nil
+	}
+
+	// Fallback: IPC scan
+	type scanIPCPutDB interface {
+		Scan(prefix string) ([]KeyValue, error)
+		Put(key, value []byte) error
+	}
+
+	if db, ok := pq.db.(scanIPCPutDB); ok {
+		kvs, err := db.Scan(string(prefix))
+		if err != nil {
+			return err
+		}
+		for _, kv := range kvs {
+			var existing Task
+			if json.Unmarshal(kv.Value, &existing) != nil {
+				continue
+			}
+			if existing.TaskID == task.TaskID {
+				updatedValue, _ := json.Marshal(task)
+				return db.Put(kv.Key, updatedValue)
+			}
+		}
+	}
+
 	return nil
 }
 

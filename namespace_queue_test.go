@@ -24,5 +24,5 @@ func TestQueueTypes(t *testing.T) {
 
 // TestSDKVersion tests the SDK version
 func TestSDKVersion(t *testing.T) {
-	assert.Equal(t, "0.4.1", Version)
+	assert.Equal(t, "0.4.4", Version)
 }

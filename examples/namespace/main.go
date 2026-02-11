@@ -26,7 +26,7 @@ func main() {
 	dbPath := filepath.Join(os.TempDir(), "namespace-example-db")
 	os.RemoveAll(dbPath)
 
-	fmt.Println("🚀 SochDB Namespace & Collection API Example\n")
+	fmt.Println("🚀 SochDB Namespace & Collection API Example")
 
 	// Open embedded database
 	db, err := embedded.Open(dbPath)
@@ -34,7 +34,7 @@ func main() {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 	defer db.Close()
-	fmt.Println("✅ Database opened\n")
+	fmt.Println("✅ Database opened")
 
 	// Example 1: Create namespace for a tenant
 	fmt.Println("📁 Creating namespace for tenant...")
@@ -66,7 +66,7 @@ func main() {
 	if err != nil {
 		log.Printf("Note: Collection creation simulated: %v", err)
 	}
-	fmt.Println("✅ Collection created: documents (dim=384, metric=cosine)\n")
+	fmt.Println("✅ Collection created: documents (dim=384, metric=cosine)")
 
 	// Example 3: Insert sample document embeddings
 	fmt.Println("📝 Inserting document vectors...")
@@ -181,7 +181,7 @@ func main() {
 	if err != nil {
 		log.Printf("Note: Deletion simulated: %v", err)
 	}
-	fmt.Println("✅ Document deleted\n")
+	fmt.Println("✅ Document deleted")
 
 	// Example 7: Create another collection for product embeddings
 	fmt.Println("📊 Creating product catalog collection...")
@@ -193,7 +193,7 @@ func main() {
 	if err != nil {
 		log.Printf("Note: Collection creation simulated: %v", err)
 	}
-	fmt.Println("✅ Collection created: products (dim=512, metric=dot-product)\n")
+	fmt.Println("✅ Collection created: products (dim=512, metric=dot-product)")
 
 	// Insert product embeddings
 	fmt.Println("📝 Inserting product vectors...")
@@ -244,9 +244,9 @@ func main() {
 		log.Printf("Note: Collection creation simulated: %v", err)
 	}
 	fmt.Printf("✅ Created isolated namespace: %s\n", namespace2Config.Name)
-	fmt.Println("   Each tenant has their own isolated data\n")
+	fmt.Println("   Each tenant has their own isolated data")
 
-	fmt.Println("✨ Example completed successfully!\n")
+	fmt.Println("✨ Example completed successfully!")
 	fmt.Println("Key Features Demonstrated:")
 	fmt.Println("  ✓ Multi-tenant namespace isolation")
 	fmt.Println("  ✓ Vector collections with configurable dimensions")
