@@ -57,7 +57,7 @@ Choose the deployment mode that fits your needs.
 
 # SochDB Go SDK Documentation
 
-> **Version 0.5.3** — LLM-Optimized Embedded Database with Native Vector Search
+> **Version 0.4.5** — LLM-Optimized Embedded Database with Native Vector Search
 
 ---
 
@@ -557,7 +557,7 @@ tx.Commit()  // Single fsync for entire batch
 
 ## API Reference
 
-> **Version 0.5.3** — Complete API documentation with Go examples.
+> **Version 0.4.5** — Complete API documentation with Go examples.
 
 All core logic runs in the Rust engine via CGo FFI. The SDK is a thin client.
 
