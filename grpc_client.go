@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	sochdbv1 "github.com/sochdb/sochdb-go/internal/gen/sochdbv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -16,9 +17,11 @@ import (
 // GrpcClient provides thin gRPC client for SochDB.
 // All operations are delegated to the SochDB gRPC server.
 type GrpcClient struct {
-	conn    *grpc.ClientConn
-	address string
-	timeout time.Duration
+	conn              *grpc.ClientConn
+	address           string
+	timeout           time.Duration
+	vectorIndexClient sochdbv1.VectorIndexServiceClient
+	collectionClient  sochdbv1.CollectionServiceClient
 }
 
 // GrpcClientOptions configures the gRPC client.
@@ -83,9 +86,11 @@ func NewGrpcClient(opts GrpcClientOptions) (*GrpcClient, error) {
 	}
 
 	return &GrpcClient{
-		conn:    conn,
-		address: opts.Address,
-		timeout: opts.Timeout,
+		conn:              conn,
+		address:           opts.Address,
+		timeout:           opts.Timeout,
+		vectorIndexClient: sochdbv1.NewVectorIndexServiceClient(conn),
+		collectionClient:  sochdbv1.NewCollectionServiceClient(conn),
 	}, nil
 }
 
@@ -112,22 +117,78 @@ func (c *GrpcClient) ctx() (context.Context, context.CancelFunc) {
 // ===========================================================================
 
 // CreateIndex creates a new vector index.
-// Note: Requires generated proto code. This is a placeholder implementation.
 func (c *GrpcClient) CreateIndex(name string, dimension int, metric string) error {
-	// TODO: Call VectorIndexService.CreateIndex via generated client
-	return fmt.Errorf("gRPC proto files not yet generated - run protoc to generate Go client code")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.vectorIndexClient.CreateIndex(ctx, &sochdbv1.CreateIndexRequest{
+		Name:      name,
+		Dimension: uint32(dimension),
+		Metric:    parseDistanceMetric(metric),
+		Config: &sochdbv1.HnswConfig{
+			MaxConnections:      16,
+			MaxConnectionsLayer0: 32,
+			EfConstruction:      100,
+			EfSearch:            64,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create index %q: %w", name, err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("create index %q failed: %s", name, resp.GetError())
+	}
+	return nil
 }
 
 // InsertVectors inserts vectors into an index.
 func (c *GrpcClient) InsertVectors(indexName string, ids []uint64, vectors [][]float32) (int, error) {
-	// TODO: Call VectorIndexService.InsertBatch via generated client
-	return 0, fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	flat, err := flattenVectors(vectors)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.vectorIndexClient.InsertBatch(ctx, &sochdbv1.InsertBatchRequest{
+		IndexName: indexName,
+		Ids:       ids,
+		Vectors:   flat,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("insert vectors into %q: %w", indexName, err)
+	}
+	if resp.GetError() != "" {
+		return int(resp.GetInsertedCount()), fmt.Errorf("insert vectors into %q failed: %s", indexName, resp.GetError())
+	}
+	return int(resp.GetInsertedCount()), nil
 }
 
 // GrpcSearch performs k-nearest neighbor search.
 func (c *GrpcClient) GrpcSearch(indexName string, query []float32, k int) ([]GrpcSearchResult, error) {
-	// TODO: Call VectorIndexService.Search via generated client
-	return nil, fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.vectorIndexClient.Search(ctx, &sochdbv1.SearchRequest{
+		IndexName: indexName,
+		Query:     query,
+		K:         uint32(k),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("search index %q: %w", indexName, err)
+	}
+	if resp.GetError() != "" {
+		return nil, fmt.Errorf("search index %q failed: %s", indexName, resp.GetError())
+	}
+
+	results := make([]GrpcSearchResult, 0, len(resp.GetResults()))
+	for _, result := range resp.GetResults() {
+		results = append(results, GrpcSearchResult{
+			ID:       result.GetId(),
+			Distance: result.GetDistance(),
+		})
+	}
+	return results, nil
 }
 
 // ===========================================================================
@@ -136,20 +197,125 @@ func (c *GrpcClient) GrpcSearch(indexName string, query []float32, k int) ([]Grp
 
 // CreateCollection creates a new collection.
 func (c *GrpcClient) CreateCollection(name string, dimension int, namespace string) error {
-	// TODO: Call CollectionService.CreateCollection
-	return fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.collectionClient.CreateCollection(ctx, &sochdbv1.CreateCollectionRequest{
+		Name:      name,
+		Namespace: namespace,
+		Dimension: uint32(dimension),
+		Metric:    sochdbv1.DistanceMetric_DISTANCE_METRIC_COSINE,
+	})
+	if err != nil {
+		return fmt.Errorf("create collection %q: %w", name, err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("create collection %q failed: %s", name, resp.GetError())
+	}
+	return nil
 }
 
 // AddDocuments adds documents to a collection.
 func (c *GrpcClient) AddDocuments(collectionName string, documents []GrpcDocument, namespace string) ([]string, error) {
-	// TODO: Call CollectionService.AddDocuments
-	return nil, fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	protoDocs := make([]*sochdbv1.Document, 0, len(documents))
+	for _, doc := range documents {
+		protoDocs = append(protoDocs, &sochdbv1.Document{
+			Id:        doc.ID,
+			Content:   doc.Content,
+			Embedding: doc.Embedding,
+			Metadata:  doc.Metadata,
+		})
+	}
+
+	resp, err := c.collectionClient.AddDocuments(ctx, &sochdbv1.AddDocumentsRequest{
+		CollectionName: collectionName,
+		Namespace:      namespace,
+		Documents:      protoDocs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("add documents to %q: %w", collectionName, err)
+	}
+	if resp.GetError() != "" {
+		return resp.GetIds(), fmt.Errorf("add documents to %q failed: %s", collectionName, resp.GetError())
+	}
+	return resp.GetIds(), nil
 }
 
 // SearchCollection searches a collection for similar documents.
 func (c *GrpcClient) SearchCollection(collectionName string, query []float32, k int, namespace string) ([]GrpcDocument, error) {
-	// TODO: Call CollectionService.SearchCollection
-	return nil, fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.collectionClient.SearchCollection(ctx, &sochdbv1.SearchCollectionRequest{
+		CollectionName: collectionName,
+		Namespace:      namespace,
+		Query:          query,
+		K:              uint32(k),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("search collection %q: %w", collectionName, err)
+	}
+	if resp.GetError() != "" {
+		return nil, fmt.Errorf("search collection %q failed: %s", collectionName, resp.GetError())
+	}
+
+	results := make([]GrpcDocument, 0, len(resp.GetResults()))
+	for _, result := range resp.GetResults() {
+		doc := result.GetDocument()
+		if doc == nil {
+			continue
+		}
+		results = append(results, GrpcDocument{
+			ID:        doc.GetId(),
+			Content:   doc.GetContent(),
+			Embedding: doc.GetEmbedding(),
+			Metadata:  doc.GetMetadata(),
+		})
+	}
+	return results, nil
+}
+
+// HealthCheck returns server health for the vector index service.
+func (c *GrpcClient) HealthCheck(indexName string) (string, string, []string, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.vectorIndexClient.HealthCheck(ctx, &sochdbv1.HealthCheckRequest{
+		IndexName: indexName,
+	})
+	if err != nil {
+		return "", "", nil, fmt.Errorf("health check failed: %w", err)
+	}
+	return resp.GetStatus().String(), resp.GetVersion(), resp.GetIndexes(), nil
+}
+
+func parseDistanceMetric(metric string) sochdbv1.DistanceMetric {
+	switch metric {
+	case "l2", "L2":
+		return sochdbv1.DistanceMetric_DISTANCE_METRIC_L2
+	case "dot", "dot_product", "DOT_PRODUCT":
+		return sochdbv1.DistanceMetric_DISTANCE_METRIC_DOT_PRODUCT
+	default:
+		return sochdbv1.DistanceMetric_DISTANCE_METRIC_COSINE
+	}
+}
+
+func flattenVectors(vectors [][]float32) ([]float32, error) {
+	if len(vectors) == 0 {
+		return []float32{}, nil
+	}
+	dimension := len(vectors[0])
+	flat := make([]float32, 0, len(vectors)*dimension)
+	for i, vector := range vectors {
+		if len(vector) != dimension {
+			return nil, fmt.Errorf("vector %d has dimension %d, expected %d", i, len(vector), dimension)
+		}
+		flat = append(flat, vector...)
+	}
+	return flat, nil
 }
 
 // ===========================================================================
