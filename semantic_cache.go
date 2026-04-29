@@ -1,3 +1,5 @@
+//go:build sochdb_embedded
+
 // Semantic Cache for LLM responses
 //
 // Cache LLM responses with similarity-based retrieval for cost savings.

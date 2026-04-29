@@ -1,3 +1,5 @@
+//go:build sochdb_embedded
+
 // Extraction Pipeline for Memory System
 //
 // Compiles LLM outputs into typed, validated facts (Entity, Relation, Assertion).

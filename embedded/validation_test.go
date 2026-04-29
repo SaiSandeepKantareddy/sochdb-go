@@ -1,3 +1,5 @@
+//go:build sochdb_embedded
+
 package embedded_test
 
 import (

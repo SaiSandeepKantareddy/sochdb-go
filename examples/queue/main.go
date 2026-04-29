@@ -1,3 +1,5 @@
+//go:build sochdb_embedded
+
 // Priority Queue API Example (v0.4.1)
 //
 // This example demonstrates:

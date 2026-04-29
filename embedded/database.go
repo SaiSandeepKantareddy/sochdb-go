@@ -1,3 +1,5 @@
+//go:build sochdb_embedded
+
 // Package embedded provides direct FFI access to SochDB native library
 //
 // This package uses CGO to bind directly to libsochdb_storage for embedded,
