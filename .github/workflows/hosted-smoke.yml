@@ -1,0 +1,43 @@
+name: Hosted Remote Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      grpc_address:
+        description: "Hosted SochDB gRPC address"
+        required: false
+        default: "studio.agentslab.host:50053"
+        type: string
+      namespace:
+        description: "Hosted namespace"
+        required: false
+        default: "default"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-smoke-go
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Hosted Go Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SOCHDB_GRPC_ADDRESS: ${{ inputs.grpc_address }}
+      SOCHDB_NAMESPACE: ${{ inputs.namespace }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run hosted smoke example
+        run: go run ./examples/hosted_remote

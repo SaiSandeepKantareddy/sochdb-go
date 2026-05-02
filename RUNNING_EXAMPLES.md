@@ -85,6 +85,23 @@ go run main.go
 
 The format utilities will work without a server.
 
+### 3. Hosted Remote Smoke Example
+
+This example runs a minimal hosted gRPC path against the shared demo endpoint:
+
+```bash
+SOCHDB_GRPC_ADDRESS=studio.agentslab.host:50053 \
+go run ./examples/hosted_remote
+```
+
+**Expected behavior:**
+- creates a fresh collection name per run
+- inserts demo documents
+- runs a search and prints a short result summary
+
+A matching manual GitHub Actions workflow is available at
+`.github/workflows/hosted-smoke.yml` for on-demand hosted validation.
+
 ## Running Tests
 
 ### Embedded Tests
@@ -114,6 +131,7 @@ All tests pass in ~0.45 seconds.
 | Example | Status | Notes |
 |---------|--------|-------|
 | `examples/embedded/main.go` | ✅ Working | Embedded FFI mode, no server needed |
+| `examples/hosted_remote/main.go` | ✅ Working | Hosted gRPC smoke path |
 | `example/main.go` (gRPC) | ⚠️ Requires Server | Need gRPC server running |
 | `example/main.go` (IPC) | ⚠️ Requires Server | Need IPC server at `/tmp/sochdb.sock` |
 | `example/main.go` (Format utils) | ✅ Working | Format utilities work standalone |
@@ -130,13 +148,19 @@ All tests pass in ~0.45 seconds.
 
 This is just a warning - the code will still work if CGO_LDFLAGS is set correctly.
 
-### Issue: "gRPC proto files not yet generated"
+### Issue: gRPC operation returns server-side unimplemented or runtime errors
 
-The gRPC client requires proto files to be generated. For now, use embedded mode or ensure the gRPC server is built with proto files.
+The Go SDK now includes generated gRPC stubs and a working remote client path.
+If a remote operation still fails, the most likely causes are:
+
+- the target SochDB server does not expose that RPC yet
+- the server is unreachable or misconfigured
+- the example is pointed at the wrong address or namespace
 
 ## Recommended Workflow
 
-For development and testing, use **embedded mode** which requires no server:
+For local development, **embedded mode** is still the fastest path when you do
+not need a running server:
 
 ```bash
 # One-time setup

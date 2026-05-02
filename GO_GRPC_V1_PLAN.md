@@ -5,15 +5,22 @@
 Make the Go SDK a real remote/server SDK, not a partially complete wrapper
 with placeholder gRPC methods.
 
-## Current gap
+## Previous gap
 
-`grpc_client.go` already defines the user-facing client surface, but many
-methods still return:
+The original V1 problem was that `grpc_client.go` exposed a remote client
+surface while several methods still returned placeholder errors.
 
-- `gRPC proto files not yet generated`
+That implementation gap is now closed for the current V1 slice:
 
-That means the main issue is not API design anymore.
-The main issue is implementation and generated client wiring.
+- vector index create / insert / search
+- collection create / add / search
+- graph add / traverse / edge query helpers
+- semantic cache get / put
+- trace start / span start / span end
+- KV get / put / delete
+
+The remaining work is no longer generated-stub wiring. The next work is parity,
+integration validation against a live server, and documentation cleanup.
 
 ## Priority implementation slice
 
@@ -49,7 +56,10 @@ Relevant services already exist there:
 
 - `VectorIndexService`
 - `CollectionService`
-- other services later
+- `GraphService`
+- `SemanticCacheService`
+- `TraceService`
+- `KvService`
 
 ## Required tooling
 
@@ -123,14 +133,12 @@ The Go SDK should feel like a real production client:
 - idiomatic error handling
 - minimal hidden magic
 
-## Recommended execution order
+## Recommended next execution order
 
-1. install Go + protobuf generators
-2. generate Go stubs from `sochdb.proto`
-3. wire `VectorIndexService`
-4. wire `CollectionService`
-5. add one remote example
-6. add tests against a running gRPC server
+1. add live-server integration coverage for the remote client paths
+2. tighten Python / Node / Go parity expectations per feature area
+3. add or refresh one end-to-end remote example that exercises more than vector search
+4. clean stale docs that still describe the old placeholder state
 
 ## Definition of done for Go V1
 
@@ -139,5 +147,6 @@ Go remote V1 is good enough when:
 - gRPC client stubs are generated and checked in or reproducibly generated
 - vector index create/insert/search works
 - collection create/add/search works
+- basic graph / semantic cache / trace / KV remote paths work
 - one remote example runs end to end
 - basic tests exist

@@ -17,11 +17,15 @@ import (
 // GrpcClient provides thin gRPC client for SochDB.
 // All operations are delegated to the SochDB gRPC server.
 type GrpcClient struct {
-	conn              *grpc.ClientConn
-	address           string
-	timeout           time.Duration
-	vectorIndexClient sochdbv1.VectorIndexServiceClient
-	collectionClient  sochdbv1.CollectionServiceClient
+	conn                *grpc.ClientConn
+	address             string
+	timeout             time.Duration
+	vectorIndexClient   sochdbv1.VectorIndexServiceClient
+	collectionClient    sochdbv1.CollectionServiceClient
+	graphClient         sochdbv1.GraphServiceClient
+	semanticCacheClient sochdbv1.SemanticCacheServiceClient
+	traceClient         sochdbv1.TraceServiceClient
+	kvClient            sochdbv1.KvServiceClient
 }
 
 // GrpcClientOptions configures the gRPC client.
@@ -86,11 +90,15 @@ func NewGrpcClient(opts GrpcClientOptions) (*GrpcClient, error) {
 	}
 
 	return &GrpcClient{
-		conn:              conn,
-		address:           opts.Address,
-		timeout:           opts.Timeout,
-		vectorIndexClient: sochdbv1.NewVectorIndexServiceClient(conn),
-		collectionClient:  sochdbv1.NewCollectionServiceClient(conn),
+		conn:                conn,
+		address:             opts.Address,
+		timeout:             opts.Timeout,
+		vectorIndexClient:   sochdbv1.NewVectorIndexServiceClient(conn),
+		collectionClient:    sochdbv1.NewCollectionServiceClient(conn),
+		graphClient:         sochdbv1.NewGraphServiceClient(conn),
+		semanticCacheClient: sochdbv1.NewSemanticCacheServiceClient(conn),
+		traceClient:         sochdbv1.NewTraceServiceClient(conn),
+		kvClient:            sochdbv1.NewKvServiceClient(conn),
 	}, nil
 }
 
@@ -126,10 +134,10 @@ func (c *GrpcClient) CreateIndex(name string, dimension int, metric string) erro
 		Dimension: uint32(dimension),
 		Metric:    parseDistanceMetric(metric),
 		Config: &sochdbv1.HnswConfig{
-			MaxConnections:      16,
+			MaxConnections:       16,
 			MaxConnectionsLayer0: 32,
-			EfConstruction:      100,
-			EfSearch:            64,
+			EfConstruction:       100,
+			EfSearch:             64,
 		},
 	})
 	if err != nil {
@@ -318,26 +326,127 @@ func flattenVectors(vectors [][]float32) ([]float32, error) {
 	return flat, nil
 }
 
+func graphNodeFromProto(node *sochdbv1.GraphNode) GrpcGraphNode {
+	if node == nil {
+		return GrpcGraphNode{}
+	}
+	return GrpcGraphNode{
+		ID:         node.GetId(),
+		NodeType:   node.GetNodeType(),
+		Properties: node.GetProperties(),
+	}
+}
+
+func graphEdgeFromProto(edge *sochdbv1.GraphEdge) GrpcGraphEdge {
+	if edge == nil {
+		return GrpcGraphEdge{}
+	}
+	return GrpcGraphEdge{
+		FromID:     edge.GetFromId(),
+		EdgeType:   edge.GetEdgeType(),
+		ToID:       edge.GetToId(),
+		Properties: edge.GetProperties(),
+	}
+}
+
+func parseTraversalOrder(order string) sochdbv1.TraversalOrder {
+	switch order {
+	case "dfs", "DFS":
+		return sochdbv1.TraversalOrder_TRAVERSAL_ORDER_DFS
+	default:
+		return sochdbv1.TraversalOrder_TRAVERSAL_ORDER_BFS
+	}
+}
+
+func parseSpanStatus(status string) sochdbv1.SpanStatus {
+	switch status {
+	case "ok", "OK", "success", "SUCCESS":
+		return sochdbv1.SpanStatus_SPAN_STATUS_OK
+	case "error", "ERROR", "failed", "FAILED":
+		return sochdbv1.SpanStatus_SPAN_STATUS_ERROR
+	default:
+		return sochdbv1.SpanStatus_SPAN_STATUS_UNSET
+	}
+}
+
 // ===========================================================================
 // Graph Operations
 // ===========================================================================
 
 // AddGraphNode adds a node to the graph.
 func (c *GrpcClient) AddGraphNode(nodeID, nodeType string, properties map[string]string, namespace string) error {
-	// TODO: Call GraphService.AddNode
-	return fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.graphClient.AddNode(ctx, &sochdbv1.AddNodeRequest{
+		Namespace: namespace,
+		Node: &sochdbv1.GraphNode{
+			Id:         nodeID,
+			NodeType:   nodeType,
+			Properties: properties,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("add graph node %q: %w", nodeID, err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("add graph node %q failed: %s", nodeID, resp.GetError())
+	}
+	return nil
 }
 
 // AddGraphEdge adds an edge between nodes.
 func (c *GrpcClient) AddGraphEdge(fromID, edgeType, toID string, properties map[string]string, namespace string) error {
-	// TODO: Call GraphService.AddEdge
-	return fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.graphClient.AddEdge(ctx, &sochdbv1.AddEdgeRequest{
+		Namespace: namespace,
+		Edge: &sochdbv1.GraphEdge{
+			FromId:     fromID,
+			EdgeType:   edgeType,
+			ToId:       toID,
+			Properties: properties,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("add graph edge %q->%q (%s): %w", fromID, toID, edgeType, err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("add graph edge %q->%q (%s) failed: %s", fromID, toID, edgeType, resp.GetError())
+	}
+	return nil
 }
 
 // TraverseGraph performs graph traversal from a starting node.
 func (c *GrpcClient) TraverseGraph(startNode string, maxDepth int, order string, namespace string) ([]GrpcGraphNode, []GrpcGraphEdge, error) {
-	// TODO: Call GraphService.Traverse
-	return nil, nil, fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.graphClient.Traverse(ctx, &sochdbv1.TraverseRequest{
+		Namespace:   namespace,
+		StartNodeId: startNode,
+		MaxDepth:    uint32(maxDepth),
+		Order:       parseTraversalOrder(order),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("traverse graph from %q: %w", startNode, err)
+	}
+	if resp.GetError() != "" {
+		return nil, nil, fmt.Errorf("traverse graph from %q failed: %s", startNode, resp.GetError())
+	}
+
+	nodes := make([]GrpcGraphNode, 0, len(resp.GetNodes()))
+	for _, node := range resp.GetNodes() {
+		nodes = append(nodes, graphNodeFromProto(node))
+	}
+
+	edges := make([]GrpcGraphEdge, 0, len(resp.GetEdges()))
+	for _, edge := range resp.GetEdges() {
+		edges = append(edges, graphEdgeFromProto(edge))
+	}
+
+	return nodes, edges, nil
 }
 
 // ===========================================================================
@@ -346,14 +455,39 @@ func (c *GrpcClient) TraverseGraph(startNode string, maxDepth int, order string,
 
 // CacheGet retrieves from semantic cache by similarity.
 func (c *GrpcClient) CacheGet(cacheName string, queryEmbedding []float32, threshold float32) (string, bool, error) {
-	// TODO: Call SemanticCacheService.Get
-	return "", false, fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.semanticCacheClient.Get(ctx, &sochdbv1.SemanticCacheGetRequest{
+		CacheName:           cacheName,
+		QueryEmbedding:      queryEmbedding,
+		SimilarityThreshold: threshold,
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("semantic cache get %q: %w", cacheName, err)
+	}
+	return resp.GetCachedValue(), resp.GetHit(), nil
 }
 
 // CachePut stores a value in the semantic cache.
 func (c *GrpcClient) CachePut(cacheName, key, value string, keyEmbedding []float32, ttlSeconds int) error {
-	// TODO: Call SemanticCacheService.Put
-	return fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.semanticCacheClient.Put(ctx, &sochdbv1.SemanticCachePutRequest{
+		CacheName:    cacheName,
+		Key:          key,
+		Value:        value,
+		KeyEmbedding: keyEmbedding,
+		TtlSeconds:   uint64(ttlSeconds),
+	})
+	if err != nil {
+		return fmt.Errorf("semantic cache put %q/%q: %w", cacheName, key, err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("semantic cache put %q/%q failed: %s", cacheName, key, resp.GetError())
+	}
+	return nil
 }
 
 // ===========================================================================
@@ -362,20 +496,54 @@ func (c *GrpcClient) CachePut(cacheName, key, value string, keyEmbedding []float
 
 // StartTrace starts a new trace.
 func (c *GrpcClient) StartTrace(name string) (traceID, rootSpanID string, err error) {
-	// TODO: Call TraceService.StartTrace
-	return "", "", fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.traceClient.StartTrace(ctx, &sochdbv1.StartTraceRequest{
+		Name:       name,
+		Attributes: map[string]string{},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("start trace %q: %w", name, err)
+	}
+	return resp.GetTraceId(), resp.GetRootSpanId(), nil
 }
 
 // StartSpan starts a span within a trace.
 func (c *GrpcClient) StartSpan(traceID, parentSpanID, name string) (spanID string, err error) {
-	// TODO: Call TraceService.StartSpan
-	return "", fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.traceClient.StartSpan(ctx, &sochdbv1.StartSpanRequest{
+		TraceId:      traceID,
+		ParentSpanId: parentSpanID,
+		Name:         name,
+		Attributes:   map[string]string{},
+	})
+	if err != nil {
+		return "", fmt.Errorf("start span %q on trace %q: %w", name, traceID, err)
+	}
+	return resp.GetSpanId(), nil
 }
 
 // EndSpan ends a span.
 func (c *GrpcClient) EndSpan(traceID, spanID, status string) (durationUs int64, err error) {
-	// TODO: Call TraceService.EndSpan
-	return 0, fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.traceClient.EndSpan(ctx, &sochdbv1.EndSpanRequest{
+		TraceId:    traceID,
+		SpanId:     spanID,
+		Status:     parseSpanStatus(status),
+		Attributes: map[string]string{},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("end span %q on trace %q: %w", spanID, traceID, err)
+	}
+	if !resp.GetSuccess() {
+		return 0, fmt.Errorf("end span %q on trace %q failed", spanID, traceID)
+	}
+	return int64(resp.GetDurationUs()), nil
 }
 
 // ===========================================================================
@@ -384,20 +552,58 @@ func (c *GrpcClient) EndSpan(traceID, spanID, status string) (durationUs int64, 
 
 // GrpcGet retrieves a value by key.
 func (c *GrpcClient) GrpcGet(key []byte, namespace string) ([]byte, bool, error) {
-	// TODO: Call KvService.Get
-	return nil, false, fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.kvClient.Get(ctx, &sochdbv1.KvGetRequest{
+		Namespace: namespace,
+		Key:       key,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("kv get %q: %w", string(key), err)
+	}
+	if resp.GetError() != "" {
+		return nil, false, fmt.Errorf("kv get %q failed: %s", string(key), resp.GetError())
+	}
+	return resp.GetValue(), resp.GetFound(), nil
 }
 
 // GrpcPut stores a value.
 func (c *GrpcClient) GrpcPut(key, value []byte, namespace string, ttlSeconds int) error {
-	// TODO: Call KvService.Put
-	return fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.kvClient.Put(ctx, &sochdbv1.KvPutRequest{
+		Namespace:  namespace,
+		Key:        key,
+		Value:      value,
+		TtlSeconds: uint64(ttlSeconds),
+	})
+	if err != nil {
+		return fmt.Errorf("kv put %q: %w", string(key), err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("kv put %q failed: %s", string(key), resp.GetError())
+	}
+	return nil
 }
 
 // GrpcDelete removes a key.
 func (c *GrpcClient) GrpcDelete(key []byte, namespace string) error {
-	// TODO: Call KvService.Delete
-	return fmt.Errorf("gRPC proto files not yet generated")
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.kvClient.Delete(ctx, &sochdbv1.KvDeleteRequest{
+		Namespace: namespace,
+		Key:       key,
+	})
+	if err != nil {
+		return fmt.Errorf("kv delete %q: %w", string(key), err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("kv delete %q failed: %s", string(key), resp.GetError())
+	}
+	return nil
 }
 
 // ===========================================================================
@@ -428,6 +634,25 @@ func (c *GrpcClient) AddEdge(ctx context.Context, namespace string, edge GrpcGra
 
 // QueryGraph queries the graph for edges (convenience wrapper).
 func (c *GrpcClient) QueryGraph(ctx context.Context, namespace, fromID, edgeType string, limit int) ([]GrpcGraphEdge, error) {
-	// For now, return placeholder
-	return nil, fmt.Errorf("gRPC proto files not yet generated")
+	resp, err := c.graphClient.GetEdges(ctx, &sochdbv1.GetEdgesRequest{
+		Namespace: namespace,
+		NodeId:    fromID,
+		EdgeType:  edgeType,
+		Direction: sochdbv1.EdgeDirection_EDGE_DIRECTION_OUTGOING,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query graph edges from %q: %w", fromID, err)
+	}
+	if resp.GetError() != "" {
+		return nil, fmt.Errorf("query graph edges from %q failed: %s", fromID, resp.GetError())
+	}
+
+	edges := make([]GrpcGraphEdge, 0, len(resp.GetEdges()))
+	for _, edge := range resp.GetEdges() {
+		edges = append(edges, graphEdgeFromProto(edge))
+		if limit > 0 && len(edges) >= limit {
+			break
+		}
+	}
+	return edges, nil
 }
