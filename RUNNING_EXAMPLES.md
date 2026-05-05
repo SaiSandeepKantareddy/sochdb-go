@@ -102,6 +102,11 @@ go run ./examples/hosted_remote
 A matching manual GitHub Actions workflow is available at
 `.github/workflows/hosted-smoke.yml` for on-demand hosted validation.
 
+Latest hosted validation:
+
+- GitHub-hosted workflow passed on May 5, 2026:
+  `https://github.com/SaiSandeepKantareddy/sochdb-go/actions/runs/25357488825`
+
 ## Running Tests
 
 ### Embedded Tests
