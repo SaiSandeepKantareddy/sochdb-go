@@ -1,3 +1,5 @@
+//go:build sochdb_embedded
+
 // Namespace and Collection API Example (v0.4.1)
 //
 // This example demonstrates:

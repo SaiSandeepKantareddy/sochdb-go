@@ -1,3 +1,5 @@
+//go:build sochdb_embedded
+
 // HybridRetriever for Memory System
 //
 // Combines BM25 (lexical) and vector similarity (semantic) with Reciprocal Rank Fusion (RRF).

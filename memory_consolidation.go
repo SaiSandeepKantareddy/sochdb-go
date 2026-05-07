@@ -1,3 +1,5 @@
+//go:build sochdb_embedded
+
 // Consolidator for Memory System
 //
 // Event-sourced consolidation with append-only events and derived canonical facts.
