@@ -133,10 +133,14 @@ func (c *GrpcClient) CreateIndex(name string, dimension int, metric string) erro
 		Name:      name,
 		Dimension: uint32(dimension),
 		Metric:    parseDistanceMetric(metric),
+		// Match the engine's HnswConfig::default() (m=32, m0=64, efC=256, F32)
+		// so an untuned index reaches 95+ recall@10 (Cohere-1M 768d cosine =
+		// 0.972). The old m=16/m0=32/efC=100 built a cheap graph that capped
+		// recall near 0.90 on hard data.
 		Config: &sochdbv1.HnswConfig{
-			MaxConnections:       16,
-			MaxConnectionsLayer0: 32,
-			EfConstruction:       100,
+			MaxConnections:       32,
+			MaxConnectionsLayer0: 64,
+			EfConstruction:       256,
 			EfSearch:             64,
 		},
 	})

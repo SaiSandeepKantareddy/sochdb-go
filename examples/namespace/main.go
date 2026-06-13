@@ -62,8 +62,8 @@ func main() {
 		Dimension:          384, // Common for all-MiniLM-L6-v2 embeddings
 		Metric:             sochdb.DistanceMetricCosine,
 		Indexed:            true,
-		HNSWM:              16,
-		HNSWEfConstruction: 200,
+		HNSWM:              32,
+		HNSWEfConstruction: 256,
 	})
 	if err != nil {
 		log.Printf("Note: Collection creation simulated: %v", err)
